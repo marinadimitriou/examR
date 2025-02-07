@@ -1,0 +1,407 @@
+---
+title: Examination Project in R
+author: Marina Dimitriou
+email: marina.dimitriou.8935@student.uu.se
+date: 02 December 2024
+mainfont: "Times New Roman"
+sansfont: "Arial"
+mathfont: "TeX Gyre Termes Math"
+monofont: "Courier New"
+fontsize: 12pt
+output: 
+ html_document: 
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts = list(width.cutoff = 60))
+```
+
+
+# Setup environment
+## Load libraries
+```{r libraries}
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ncappc)
+```
+
+
+## Define functions
+In this section, the functions that will be used later are defined.
+```{r functions}
+# Function to calculate AUC with the trapezoidal rule
+## Calculate trapezoids for each interval [Trn=(tn-tn-1)*(Cn-1+Cn)/2]
+## Add the the trapezoids together
+## Add the residual area (Cn/k)
+measure_auc <- function(time, conc, k) {
+  trapezoids <- diff(time) * (head(conc, -1) + tail(conc, -1)) / 2
+  auc <- sum(trapezoids)
+  auc <- auc + conc[length(conc)] / k
+  return(auc)
+}
+
+# Function to numerically summarize the PK variables 
+num_summarize <- function(data, columns) {
+  for (col in columns) {
+    cat("\nNumerical Summary for", col, ":\n")
+    stats <- data.frame(
+      mean = mean(data[[col]]),
+      median = median(data[[col]]),
+      sd = sd(data[[col]]),
+      range = diff(range(data[[col]])),
+      min = min(data[[col]]),
+      max = max(data[[col]])
+      )
+      print(stats)
+  }
+}
+```
+
+## Set working directory
+```{r wd}
+# Set the working directory for the entire notebook
+knitr::opts_knit$set(root.dir = "C:/Users/mardi/Documents/Exam")
+```
+
+# Data management 
+This section includes data import, variable assignment, dataset reorganisation (merge + long format)
+
+```{r data management}
+# Import the data sets
+
+dir_name <- paste("Orig_data", sep = "/") # For path to the data
+
+## Set the file names and file paths
+file_name_pk <- "BPI889_PK_17.csv"
+file_name_cov <- "BPI889_cov_17.txt"
+file_path_pk <- paste(dir_name, file_name_pk, sep = "/")
+file_path_cov <- paste(dir_name, file_name_cov, sep = "/")
+
+## Import both datasets as R-objects
+data_pk <- read.csv(file = file_path_pk, # It is a csv file
+                    header = TRUE,    # The 1st row of csv has the column names
+                    as.is = TRUE,     # Prevents turning character to factor
+                    na.strings = ".") # The dots should be treated as NA
+
+data_cov <- read.table(file = file_path_cov,  # It is a txt file
+                       header = TRUE, # The 1st row of txt has the column names
+                       sep = ",",     # The column separator is comma
+                       as.is = TRUE)  # Prevents turning character to factor
+
+
+## Visually inspect the imported datasets
+str(data_pk)
+str(data_cov)
+head(data_pk, n = 10)  # To inspect the first 10 rows of data_pk
+head(data_cov, n = 10) # To inspect the first 10 rows of data_cov
+
+# Variable assignment and dataset reorganization
+
+## Change the names of the columns of data_cov to make them more readable
+names(data_cov) <- gsub("\\.$", "", names(data_cov))  # Remove last dot
+names(data_cov) <- gsub("\\.+", "_", names(data_cov)) # Replace dots with "_"
+names(data_cov) <- gsub("^X", "CYP", names(data_cov)) # Replace "X" with "CYP"
+names(data_cov)[1] <- "pat" # Change the first name from patid to pat
+
+names(data_cov) # To check the changed names
+
+## Change data_pk from a wide to a long format
+tidy_pk <- gather(data = data_pk, key = Time_h, value = Conc_mg_L, -pat)
+
+nrow(tidy_pk) # To print the dimensions of tidy_pd
+ncol(tidy_pk) # To print the dimensions of tidy_pd
+head(tidy_pk, n = 5) # To output the first 5 rows of tidy_pd
+
+## Format Numeric variables
+
+### Concentration and time need to be numeric not characters
+summary(tidy_pk$Conc_mg_L) # To check if variable is numeric
+summary(tidy_pk$Time_h) # To check if variable is numeric
+
+tidy_pk$Time_h <- gsub("[^0-9.]", "", tidy_pk$Time_h) # To remove letters
+head(tidy_pk$Time_h) # Check if it was removed successfully 
+
+unique(tidy_pk$Time_h) # To look at the unique values in Time_h
+tidy_pk$Time_h <- as.numeric(tidy_pk$Time_h) # To convert Time_h to numeric
+str(tidy_pk$Time_h) # To check if it was converted to numeric 
+
+##Format categorical variables (Sex and CYP)
+
+###Factorize Sex
+data_cov$Sex <- factor(data_cov$Sex, levels = c("M", "F"),
+                         labels = c("Male", "Female"))
+
+### Define the column names with enzymes to factorize
+cyp_columns <- c("CYP2D6", "CYP3A4", "CYP2C9", "CYP2C19")
+
+### Factorize the enzymes with levels of metabolizing activity
+for (col in cyp_columns) {
+  data_cov[[col]] <- factor(data_cov[[col]], 
+                            levels = c(0, 1, 2), 
+                            labels = c("Poor", "Normal", "Extensive"))
+}
+
+str(data_cov) # To check if Sex and CYP columns were factorized successfully
+
+## Merge the 2 data sets by patient ID ("pat")
+data_all <- merge(tidy_pk, data_cov, by = "pat") 
+
+## Reorder rows in the new data set by first increasing ID and then TIME
+data_all <- data_all[order(data_all$pat, data_all$Time_h), ]
+```
+
+# Variable calculations
+This section includes the **calculation of body size measurement (BFP)**, **categorization of BFP** and **PK variable calculation**
+
+```{r variable calculations}
+# Calculation of body size measurement
+
+## Calculate BFP for men and women (height was in cm and divided by 100 to m)
+data_all$BFP_percent <- ifelse(
+  data_all$Sex == "Male", 
+  1.2 * (data_all$Weight_kg / (data_all$Height_cm / 100)^2) +
+    (0.23 * data_all$Age_yrs) - 16.2, 
+  1.2 * (data_all$Weight_kg / (data_all$Height_cm / 100)^2) +
+    (0.23 * data_all$Age_yrs) - 5.4
+)
+
+# Categorization of BFP
+
+## Create a new variable CBFP to categorize BFP based on a 24% cutoff
+### Assign 0 for BFP under 24% and 1 for BFP above 24%
+data_all$CBFP <- ifelse(data_all$BFP < 24, 0, 1)
+
+### Factorize CBFP                   
+data_all$CBFP <- factor(data_all$CBFP,
+                          levels = c(0, 1),
+                          labels = c("Below 24%", "Above 24%"))
+
+table(data_all$CBFP) # To summarize CBFP
+
+str(data_all) # To see that CBFP was factorized correctly
+
+# PK variable calculation
+
+## Calculate Cmax (mg/L) and tmax (h) and add them in columns to the data_all
+data_all <- data_all %>%
+  group_by(pat) %>%
+  mutate(
+    Cmax_mg_L = max(Conc_mg_L, na.rm = TRUE),
+    tmax_h = Time_h[which.max(Conc_mg_L)]
+  ) %>%
+  ungroup()
+
+str(data_all) # To check the 2 new columns of containing Cmax and tmax
+
+## Find terminal phase to calculate k and then t1/2
+
+### Create spaghetti plot to display individual concentrations of BPI889 vs time
+### To roughly check which time points should be included for the terminal phase
+ggplot(data_all, aes(x = Time_h, y = Conc_mg_L, group = pat)) +
+  geom_line() 
+
+### Time=48h should be excluded after reviewing graph (not linear decline)
+### Check if all time points after tmax and without 48h, are the terminal phase 
+### Perform linear regression on the log-transformed concentration for each pat
+### Threshold for log-linearity for R-squared is 0.9
+
+check_terminal <- data_all %>%
+  filter(!is.na(Conc_mg_L)) %>%
+  filter(Time_h > tmax_h & Time_h != 48) %>%
+  group_by(pat) %>%
+  summarise(
+    r_squared = ifelse(n() < 2, NA, summary(lm(log(Conc_mg_L) ~ Time_h))$r.squared),
+    is_terminal = r_squared > 0.9 
+  )
+
+### Find if there are patients without enough time points for linear regression
+any_na <- any(is.na(check_terminal$is_terminal))
+### Count the number of patients who do not meet the log-linearity threshold
+false_count <- sum(check_terminal$is_terminal == FALSE)
+
+### Print a message if all patients meet the log-linearity requirement or not
+terminal_approval <- ifelse(
+  false_count == 0 & any_na == FALSE, 
+  "This is an acceptable terminal phase for all patients",
+  "This isn't an acceptable terminal phase for all patients.")
+print(terminal_approval) # Print the message
+
+## Calculate k and then calculate half life (t_half_h)
+### Fit the regression model and store in a list
+### Calculate k from the slope (negate to make it positive)
+k_values <- data_all %>%
+  group_by(pat) %>%                                 
+  filter(Time_h > tmax_h & Time_h != 48) %>%         
+  summarise(
+    model = list(lm(log(Conc_mg_L) ~ Time_h)),  
+    k = -coef(model[[1]])[2],  
+    t_half_h = log(2) / k                  
+  ) %>%
+  ungroup()
+
+### Add k and half life (t_half_h) as a column to data_all
+data_all <- merge(data_all, k_values[, c("pat", "k", "t_half_h")], by = "pat")
+
+
+## Calculate AUC for each patient using the function 
+auc_values <- data_all %>%
+  group_by(pat) %>%                         
+  filter(!is.na(Conc_mg_L)) %>%             
+  summarise(AUC_mgh_L = measure_auc(Time_h, Conc_mg_L, k = k[1])) %>%
+  ungroup() 
+
+### Add AUC (AUC_mgh_L) to data_all
+data_all <- merge(data_all, auc_values[, c("pat", "AUC_mgh_L")], by = "pat")
+
+## Calculate CL for each patient and add it as a column (CL_L_h) to data_all
+data_all$Dose_mg <- 200 # Add column to data_all for the dose which was 200mg
+data_all$CL_L_h <- data_all$Dose_mg/data_all$AUC_mgh_L  # Calculate CL=Dose/AUC
+
+str(data_all) # To check the new columns
+```
+
+
+# Data exploration
+This section includes the **numerical summary of PK variables** and the **graphical assessment of** 1) PK profiles, 2) PK variable correlations, 3) PK variable-CYP enzyme correlations, 4) PK variable-body size measurement correlation with linear regression
+
+
+```{r data exploration}
+# Numerical summary of PK variables
+
+## Create data_first that has only the 1st obs for each patient
+### Because the PK variables are the same for every row of each patient
+data_first <- data_all[!duplicated(data_all$pat), ]
+
+## Create vector that has the names of the columns of PK variables
+PK_variables <- c("Cmax_mg_L", "tmax_h", "t_half_h", "CL_L_h")
+
+## Use the function to numerically summarize the PK variables
+num_summarize(data_first, PK_variables)
+
+# Graphical assessment
+
+## Create spaghetti plot to display individual concentrations of BPI889 vs time
+
+data_clean <- data_all %>% filter(!is.na(Conc_mg_L)) # need to remove NA to plot
+
+ggplot(data_clean, 
+       aes(x = Time_h, y = Conc_mg_L, group = pat, color = as.factor(pat))
+  ) +
+  geom_line() +
+  scale_x_continuous(
+    breaks = c(0.5, 1, 2, 4, 6, 8, 12, 24 , 48),
+    labels = c("0.5", "1", "2", "4", "6", "8", "12", "24", "48")
+  ) +
+  labs(
+    title = "Individual concentrations of BPI889 vs Time",
+    x = "Time (hours)",
+    y = "Concentration (mg/L)"
+  ) +
+  theme_minimal() + 
+  theme(legend.position = "none") # Hide the legend because there are many pat
+
+## Create a correlation plot between Cmax, tmax, t1/2, and CL
+GGally::ggpairs(data_first[, PK_variables])
+
+## Create box-and-whisker plots to display t1/2 and CL vs all the given enzymes
+### Create first empty lists to store the plots
+thalf_plots <- list()
+cl_plots <- list()
+
+### Loop through enzymes and create the box plots for t1/2
+for (enzyme in cyp_columns) {
+  tplot <- ggplot(data = data_first, aes(x = .data[[enzyme]], 
+                  y = t_half_h, fill = .data[[enzyme]])) +
+          geom_boxplot(outlier.colour = "black", outlier.shape = 16, 
+                       outlier.size = 2, notch = FALSE) +
+          labs(title = paste("Box plot of t1/2 vs", enzyme, "Enzyme"),
+                y = "t1/2 (h)") +
+          scale_fill_brewer(palette = "Set2") +
+          theme_classic()
+  
+  thalf_plots[[enzyme]] <- tplot
+}
+
+### Display the t1/2 vs enzyme box plots in the desired way
+ggpubr::ggarrange(plotlist = thalf_plots, ncol = 2, nrow = 2) 
+
+### Loop through enzymes and create the box plots for clearance 
+for (enzyme in cyp_columns) {
+  clplot <- ggplot(data = data_first, aes(x = .data[[enzyme]], 
+                    y = CL_L_h, fill = .data[[enzyme]])) +
+            geom_boxplot(outlier.colour = "black", outlier.shape = 16, 
+                         outlier.size = 2, notch = FALSE) +
+            labs(title = paste("Box plot of CL vs", enzyme, "Enzyme"),
+                 y = "Clearance (L/h)") +
+            scale_fill_brewer(palette = "Set2") +
+            theme_classic()
+  
+  cl_plots[[enzyme]] <- clplot
+}
+
+### Display the clearance vs enzyme box plots in the desired way
+ggpubr::ggarrange(plotlist = cl_plots, ncol = 2, nrow = 2) 
+
+## Create a scatter plot to display correlation between t1/2 and BFP, with lm
+
+ggplot(data_first, aes(x = BFP_percent, y = t_half_h, color = CBFP )) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red" ) +
+  labs(
+    title = "Scatter Plot of t1/2 vs BFP",
+    x = "Body Fat Percentage (%)",
+    y = "t1/2 (h)"
+  )
+```
+
+# Statistical testing
+This section includes **ANOVA of the PK variables for the four individual CYP-enzymes** and the **linear regression of t1/2 versus BFP**.
+
+```{r statistical testing}
+# Perform an ANOVA on Cmax and CL across the four individual CYP-enzymes 
+## The phenotypes of the CYPs are categorical
+### as.formula is used in order for the output to have CYP name as row name
+#### Οtherwise, it could be done without using as.formula
+
+for (enzyme in cyp_columns) {
+  # Perform ANOVA for Cmax
+  formula_cmax <- as.formula(paste("Cmax_mg_L ~", enzyme))
+  print(paste("ANOVA for Cmax and", enzyme))
+  model_cmax <- aov(formula_cmax, data = data_first)
+  print(summary(model_cmax))
+  
+  # Perform ANOVA for CL
+  formula_cl <- as.formula(paste("CL_L_h ~", enzyme))
+  print(paste("ANOVA for CL and", enzyme))
+  model_cl <- aov(formula_cl, data = data_first)
+  print(summary(model_cl))
+}
+
+# Perform a linear regression of t1/2 versus BFP.
+lm_thalf_BFP <- lm(t_half_h ~ BFP_percent, data = data_first)
+
+## Show the summary of the regression model
+summary(lm_thalf_BFP)
+
+### Extract p-value
+p_value <- summary(lm_thalf_BFP)$coefficients[2, 4]
+
+### Report if the p-value is significant
+report_lm <- ifelse(
+  p_value < 0.05,
+  "The relationship between BFP and t1/2 is statistically significant.",
+  "The relationship between BFP and t1/2 isn't statistically significant."
+)
+print(report_lm)
+```
+# Final answers to the research questions
+From the statistical analysis performed in the section above, the distribution of BPI889 seems to be dependent on BFP and the elimination of BPI889 seems to be dependent on CYP2D6.
