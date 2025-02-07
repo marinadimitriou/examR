@@ -6,4 +6,5 @@ My solution to the exam project in R for the "Introduction to Programming in Pyt
 Grade: VG "passed with distinction" (the highest possible grade).
 
 Instructions for this project can be found in the file "R Exam Instructions.pdf".
+
 This project mainly included calculations and visualization of pharmakokinetic parameters.
